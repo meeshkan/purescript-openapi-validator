@@ -3,24 +3,28 @@ module Data.OpenAPI.V300.Validator.Lens where
 import Prelude
 import Control.Monad.Rec.Class (tailRec, Step(..))
 import Data.Array (notElem)
-import Data.Either (Either(..), either)
+import Data.Either (Either(..), either, note)
 import Data.Foldable (fold)
 import Data.HttpTypes.V000 (Method(..))
 import Data.Int as Int
+import Data.Lens (Forget)
 import Data.Lens as L
 import Data.Lens.Record as LR
-import Data.List (List(..), (:))
+import Data.List (List(..), (:), filter)
 import Data.List as List
+import Data.List.NonEmpty (fromList, NonEmptyList)
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.Maybe.First (First)
+import Data.Monoid.Endo (Endo)
 import Data.OpenAPI.V300 as AST
 import Data.Profunctor.Choice (class Choice)
 import Data.String.Regex (Regex, regex, test)
 import Data.String.Regex.Flags (noFlags)
 import Data.Symbol (SProxy(..))
-import Data.Tuple (Tuple(..), fst, uncurry)
-import Simple.JSON (writeJSON)
+import Data.Tuple (Tuple(..), fst, snd, uncurry)
+import Foreign (ForeignError)
+import Simple.JSON (readJSON, writeJSON)
 
 down ∷ ∀ a b o. Tuple (a → b) (b → Maybe a) → (Choice o ⇒ o a a → o b b)
 down = uncurry L.prism'
@@ -39,11 +43,29 @@ referenceOrPrism' f obj = L.prism' AST.RealDeal referenceOrPrism''
 
   referenceOrPrism'' (AST.Ref (AST.Reference { _ref: s })) = maybe Nothing referenceOrPrism'' (L.preview (f s) obj)
 
+--- ugggggh
+referenceOrPrismT' ∷
+  ∀ a o.
+  Choice o ⇒
+  L.Wander o ⇒
+  (String → L.Forget (First (AST.ReferenceOr a)) (AST.ReferenceOr a) (AST.ReferenceOr a) → L.Forget (First (AST.ReferenceOr a)) AST.OpenAPIObject AST.OpenAPIObject) →
+  AST.OpenAPIObject →
+  (o (Tuple String a) (Tuple String a) → o (Tuple String (AST.ReferenceOr a)) (Tuple String (AST.ReferenceOr a)))
+referenceOrPrismT' f obj = L.prism' (\(Tuple k v) → Tuple k $ AST.RealDeal v) referenceOrPrismT''
+  where
+  referenceOrPrismT'' ∷ Tuple String (AST.ReferenceOr a) → Maybe (Tuple String a)
+  referenceOrPrismT'' (Tuple s (AST.RealDeal rd)) = Just (Tuple s rd)
+
+  referenceOrPrismT'' (Tuple ss (AST.Ref (AST.Reference { _ref: s }))) = maybe Nothing (\v → referenceOrPrismT'' $ Tuple ss v) (L.preview (f s) obj)
+
 referenceOrSchemaPrism ∷ ∀ o. Choice o ⇒ L.Wander o ⇒ AST.OpenAPIObject → (o AST.Schema AST.Schema → o (AST.ReferenceOr AST.Schema) (AST.ReferenceOr AST.Schema))
 referenceOrSchemaPrism = referenceOrPrism' lensToReferenceOrSchema
 
 referenceOrHeaderPrism ∷ ∀ o. Choice o ⇒ L.Wander o ⇒ AST.OpenAPIObject → (o AST.Header AST.Header → o (AST.ReferenceOr AST.Header) (AST.ReferenceOr AST.Header))
 referenceOrHeaderPrism = referenceOrPrism' lensToReferenceOrHeader
+
+referenceOrHeaderPrismT ∷ ∀ o. Choice o ⇒ L.Wander o ⇒ AST.OpenAPIObject → (o (Tuple String AST.Header) (Tuple String AST.Header) → o (Tuple String (AST.ReferenceOr AST.Header)) (Tuple String (AST.ReferenceOr AST.Header)))
+referenceOrHeaderPrismT = referenceOrPrismT' lensToReferenceOrHeader
 
 referenceOrParameterPrism ∷ ∀ o. Choice o ⇒ L.Wander o ⇒ AST.OpenAPIObject → (o AST.Parameter AST.Parameter → o (AST.ReferenceOr AST.Parameter) (AST.ReferenceOr AST.Parameter))
 referenceOrParameterPrism = referenceOrPrism' lensToReferenceOrParameter
@@ -91,6 +113,79 @@ lensToHeaders = lensToComponent $ LR.prop (SProxy ∷ SProxy "_headers")
 
 mapIso :: forall k v. Ord k => L.Iso (Map.Map k v) (Map.Map k v) (List (Tuple k v)) (List (Tuple k v))
 mapIso = L.iso Map.toUnfoldable Map.fromFoldable
+
+headerIso :: L.Iso (Tuple String AST.Header) (Tuple String AST.Header) AST.Parameter AST.Parameter
+headerIso =
+  L.iso
+    ( \( Tuple
+          k
+          ( AST.Header
+            { _description
+          , _required
+          , _deprecated
+          , _allowEmptyValue
+          , _style
+          , _explode
+          , _allowReserved
+          , _schema
+          , _content
+          , _example
+          , _examples
+          , _x
+          }
+        )
+      ) →
+        AST.Parameter
+          { _in: "header"
+          , _name: k
+          , _description
+          , _required
+          , _deprecated
+          , _allowEmptyValue
+          , _style
+          , _explode
+          , _allowReserved
+          , _schema
+          , _content
+          , _example
+          , _examples
+          , _x
+          }
+    )
+    ( \( AST.Parameter
+          { _in
+        , _name
+        , _description
+        , _required
+        , _deprecated
+        , _allowEmptyValue
+        , _style
+        , _explode
+        , _allowReserved
+        , _schema
+        , _content
+        , _example
+        , _examples
+        , _x
+        }
+      ) →
+        ( Tuple _name
+            $ AST.Header
+                { _description
+                , _required
+                , _deprecated
+                , _allowEmptyValue
+                , _style
+                , _explode
+                , _allowReserved
+                , _schema
+                , _content
+                , _example
+                , _examples
+                , _x
+                }
+        )
+    )
 
 lensToReferenceOrA ∷ ∀ a o. Choice o ⇒ L.Wander o ⇒ String → o (AST.ReferenceOr a) (AST.ReferenceOr a) → o (AST.OAIMap (AST.ReferenceOr a)) (AST.OAIMap (AST.ReferenceOr a))
 lensToReferenceOrA s =
@@ -148,7 +243,7 @@ lensToParameterFromTypeWithParameters ∷
   Choice o ⇒
   L.Wander o ⇒
   AST.OpenAPIObject →
-  o AST.Parameter AST.Parameter ->
+  o AST.Parameter AST.Parameter →
   o (ParametersRecord r) (ParametersRecord r)
 lensToParameterFromTypeWithParameters obj =
   LR.prop (SProxy ∷ SProxy "_parameters")
@@ -169,15 +264,109 @@ lensToParametersForMethod obj m =
     <<< down AST._Operation
     <<< lensToParameterFromTypeWithParameters obj
 
+lensToHeadersForResponse ∷
+  ∀ o.
+  Choice o ⇒
+  L.Wander o ⇒
+  AST.OpenAPIObject →
+  Method →
+  String →
+  o AST.Parameter AST.Parameter →
+  o AST.PathItem AST.PathItem
+lensToHeadersForResponse obj m s =
+  lensToResponseForMethod obj m s
+    <<< down AST._Response
+    <<< LR.prop (SProxy ∷ SProxy "_headers")
+    <<< L._Just
+    <<< down AST._OAIMap
+    <<< mapIso
+    <<< L.traversed
+    <<< (referenceOrHeaderPrismT obj)
+    <<< headerIso
+
+lensToRequestBodyForMethod ∷ ∀ o. Choice o ⇒ L.Wander o ⇒ AST.OpenAPIObject → Method → o AST.RequestBody AST.RequestBody → o AST.PathItem AST.PathItem
+lensToRequestBodyForMethod obj m =
+  down AST._PathItem
+    <<< methodToLens m
+    <<< L._Just
+    <<< down AST._Operation
+    <<< LR.prop (SProxy ∷ SProxy "_requestBody")
+    <<< L._Just
+    <<< referenceOrRequestBodyPrism obj
+
+lensToResponsesForMethod ∷ ∀ o. Choice o ⇒ L.Wander o ⇒ AST.OpenAPIObject → Method → o (AST.OAIMap (AST.ReferenceOr AST.Response)) (AST.OAIMap (AST.ReferenceOr AST.Response)) → o AST.PathItem AST.PathItem
+lensToResponsesForMethod obj m =
+  down AST._PathItem
+    <<< methodToLens m
+    <<< L._Just
+    <<< down AST._Operation
+    <<< LR.prop (SProxy ∷ SProxy "_responses")
+
+lensToResponseKeysForMethod ∷ ∀ o. Choice o ⇒ L.Wander o ⇒ AST.OpenAPIObject → Method → o String String → o AST.PathItem AST.PathItem
+lensToResponseKeysForMethod obj m =
+  lensToResponsesForMethod obj m
+    <<< down AST._OAIMap
+    <<< mapIso
+    <<< L.traversed
+    <<< L._1
+
+lensToResponseForMethod ∷ ∀ o. Choice o ⇒ L.Wander o ⇒ AST.OpenAPIObject → Method → String → o AST.Response AST.Response → o AST.PathItem AST.PathItem
+lensToResponseForMethod obj m s =
+  lensToResponsesForMethod obj m
+    <<< down AST._OAIMap
+    <<< mapIso
+    <<< L.traversed
+    <<< L.filtered (\(Tuple k v) → k == "default" || k == s)
+    <<< L._2
+    <<< referenceOrResponsePrism obj
+
+lensToResponseSchemasForMethod ∷ ∀ o. Choice o ⇒ L.Wander o ⇒ AST.OpenAPIObject → Method → String → o (AST.ReferenceOr AST.Schema) (AST.ReferenceOr AST.Schema) → o AST.PathItem AST.PathItem
+lensToResponseSchemasForMethod obj m s =
+  lensToResponseForMethod obj m s
+    <<< down AST._Response
+    <<< LR.prop (SProxy ∷ SProxy "_content")
+    <<< L._Just
+    <<< lensFromContentToReferenceOrSchemas
+
+lensFromContentToReferenceOrSchemas ∷
+  ∀ o.
+  Choice o ⇒
+  L.Wander o ⇒
+  o (AST.ReferenceOr AST.Schema) (AST.ReferenceOr AST.Schema) →
+  o (AST.OAIMap AST.MediaType) (AST.OAIMap AST.MediaType)
+lensFromContentToReferenceOrSchemas =
+  down AST._OAIMap
+    <<< mapIso
+    <<< L.traversed
+    <<< L._2
+    <<< down AST._MediaType
+    <<< LR.prop (SProxy ∷ SProxy "_schema")
+    <<< L._Just
+
 lensToPathParameter ∷ ∀ o. Choice o ⇒ L.Wander o ⇒ o AST.Parameter AST.Parameter → o AST.Parameter AST.Parameter
 lensToPathParameter = L.filtered ((==) "path" <<< _._in <<< \(AST.Parameter p) → p)
 
-getPathParametersForPathAndMethod ∷ AST.OpenAPIObject → AST.PathItem → Method → List AST.Parameter
-getPathParametersForPathAndMethod obj pi m =
+lensToHeaderParameter ∷ ∀ o. Choice o ⇒ L.Wander o ⇒ o AST.Parameter AST.Parameter → o AST.Parameter AST.Parameter
+lensToHeaderParameter = L.filtered ((==) "header" <<< _._in <<< \(AST.Parameter p) → p)
+
+lensToQueryParameter ∷ ∀ o. Choice o ⇒ L.Wander o ⇒ o AST.Parameter AST.Parameter → o AST.Parameter AST.Parameter
+lensToQueryParameter = L.filtered ((==) "query" <<< _._in <<< \(AST.Parameter p) → p)
+
+getParametersForPathAndMethod' ∷ (Forget (Endo Function (List AST.Parameter)) AST.Parameter AST.Parameter → Forget (Endo Function (List AST.Parameter)) AST.Parameter AST.Parameter) → AST.OpenAPIObject → AST.PathItem → Method → List AST.Parameter
+getParametersForPathAndMethod' l obj pi m =
   fold
     $ map
-        (\q → L.toListOf (q <<< lensToPathParameter) pi)
+        (\q → L.toListOf (q <<< l) pi)
         (lensToParametersForPath obj : lensToParametersForMethod obj m : Nil)
+
+getPathParametersForPathAndMethod ∷ AST.OpenAPIObject → AST.PathItem → Method → List AST.Parameter
+getPathParametersForPathAndMethod = getParametersForPathAndMethod' lensToPathParameter
+
+getQueryParametersForPathAndMethod ∷ AST.OpenAPIObject → AST.PathItem → Method → List AST.Parameter
+getQueryParametersForPathAndMethod = getParametersForPathAndMethod' lensToQueryParameter
+
+getHeaderParametersForPathAndMethod ∷ AST.OpenAPIObject → AST.PathItem → Method → List AST.Parameter
+getHeaderParametersForPathAndMethod = getParametersForPathAndMethod' lensToHeaderParameter
 
 eff ∷ ∀ a. (String → a) → String → String → a
 eff f s0 s1 = f (s0 <> s1)
@@ -497,4 +686,57 @@ validateJsonAgainstSchema errorFactory o ror __json =
           <> writeJSON j
           <> " for schema "
           <> writeJSON s
+      )
+
+schemaToMatcher ∷
+  ∀ a.
+  Monoid a ⇒
+  Eq a ⇒
+  (String → a) →
+  AST.OpenAPIObject →
+  Maybe (AST.ReferenceOr AST.Schema) →
+  String →
+  a
+schemaToMatcher _ o Nothing _ = mempty
+
+schemaToMatcher errorFactory o (Just x) s =
+  let
+    v = validateJsonAgainstSchema errorFactory o x (AST.JString s)
+  in
+    if v == mempty then
+      mempty
+    else
+      ( either
+          (\e → errorFactory $ "Error while parsing JSON " <> show e)
+          ( \j →
+              let
+                q = validateJsonAgainstSchema errorFactory o x j
+              in
+                if q == mempty then mempty else (v <> q)
+          )
+          (readJSON s ∷ Either (NonEmptyList ForeignError) AST.JSON)
+      )
+
+getViablePathItemsFor' ∷
+  ∀ a m.
+  Monoid m ⇒
+  Eq m ⇒
+  (AST.OpenAPIObject → Tuple String AST.PathItem → a → m) →
+  AST.OpenAPIObject →
+  a →
+  List (Tuple String AST.PathItem) →
+  Either m (NonEmptyList (Tuple String AST.PathItem))
+getViablePathItemsFor' d o r paths =
+  let
+    matches =
+      map
+        ( \x →
+            Tuple x $ d o x r
+        )
+        paths
+  in
+    note
+      (fold $ map snd matches)
+      ( fromList
+          $ map fst (filter ((==) mempty <<< snd) matches)
       )
