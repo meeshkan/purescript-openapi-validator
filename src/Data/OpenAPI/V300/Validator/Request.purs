@@ -215,7 +215,6 @@ defaultMatch = const mempty
 noMatch ∷ ∀ a. Show a ⇒ (String → RequestError) → a → RequestError
 noMatch errorFactory s = const (errorFactory $ "Could not build any match for" <> show s) s
 
---   | tomatch == s = RequestError (mempty { path: Just $ singleton ("Could not match " <> tomatch <> " and " <> s) })
 simpleStringMatch ∷ (String → RequestError) → String → String → RequestError
 simpleStringMatch errorFactory tomatch s
   | tomatch == s = errorFactory $ "Could not match " <> tomatch <> " and " <> s
