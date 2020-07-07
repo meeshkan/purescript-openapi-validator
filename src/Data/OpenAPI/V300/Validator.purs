@@ -8,9 +8,10 @@ module Data.OpenAPI.V300.Validator
   ) where
 
 import Prelude
+
 import Control.Monad.Rec.Class (Step(..), tailRec)
 import Data.Array (head, last, tail, init)
-import Data.Either (Either(..), note)
+import Data.Either (Either(..), either, note)
 import Data.Foldable (fold, foldl)
 import Data.Generic.Rep (class Generic)
 import Data.Generic.Rep.Show (genericShow)
@@ -24,14 +25,16 @@ import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.Newtype (class Newtype)
 import Data.OpenAPI.V300 as AST
-import Data.OpenAPI.V300.Validator.Lens (getHeaderParametersForPathAndMethod, getPathParametersForPathAndMethod, getQueryParametersForPathAndMethod, lensFromContentToReferenceOrSchemas, lensToHeadersForResponse, lensToRequestBodyForMethod, lensToResponseSchemasForMethod, schemaToMatcher)
+import Data.OpenAPI.V300.Validator.Lens (getHeaderParametersForPathAndMethod, getPathParametersForPathAndMethod, getQueryParametersForPathAndMethod, lensFromContentToReferenceOrSchemas, lensToHeadersForResponse, lensToRequestBodyForMethod, lensToResponseSchemasForMethod, validateJsonAgainstSchema)
 import Data.String (split, Pattern(..))
 import Data.String.CodeUnits (fromCharArray, toCharArray)
 import Data.Symbol (SProxy(..))
 import Data.Tuple (Tuple(..), fst, snd)
 import Effect.Class.Console (log)
 import Effect.Unsafe (unsafePerformEffect)
+import Foreign (ForeignError)
 import Record (set)
+import Simple.JSON (readJSON)
 
 log' :: forall a. Show a => a -> a
 log' a =
@@ -247,6 +250,37 @@ middle s = maybe "" fromCharArray (go (toCharArray s))
   where
   go ∷ Array Char → Maybe (Array Char)
   go arr = tail arr >>= init >>= pure
+
+----------------------
+schemaToMatcher ∷
+  ∀ a.
+  Monoid a ⇒
+  Eq a ⇒
+  (String → a) →
+  AST.OpenAPIObject →
+  Maybe (AST.ReferenceOr AST.Schema) →
+  String →
+  a
+schemaToMatcher _ o Nothing _ = mempty
+
+schemaToMatcher errorFactory o (Just x) s =
+  let
+    v = validateJsonAgainstSchema errorFactory o x (AST.JString s)
+  in
+    if v == mempty then
+      mempty
+    else
+      ( either
+          (\e → errorFactory $ "Error while parsing JSON " <> show e)
+          ( \j →
+              let
+                q = validateJsonAgainstSchema errorFactory o x j
+              in
+                if q == mempty then mempty else (v <> q)
+          )
+          (readJSON s ∷ Either (NonEmptyList ForeignError) AST.JSON)
+      )
+
 
 ------------- matchers
 defaultMatch ∷ ∀ a b. Monoid b ⇒ a → b

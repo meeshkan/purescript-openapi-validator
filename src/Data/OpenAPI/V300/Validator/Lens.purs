@@ -12,7 +12,6 @@ import Data.Lens as L
 import Data.Lens.Record as LR
 import Data.List (List(..), filter, fromFoldable, last, (:))
 import Data.List as List
-import Data.List.NonEmpty (NonEmptyList)
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.Maybe.First (First)
@@ -24,8 +23,7 @@ import Data.String.Regex (Regex, regex, test)
 import Data.String.Regex.Flags (noFlags)
 import Data.Symbol (SProxy(..))
 import Data.Tuple (Tuple(..), fst, uncurry)
-import Foreign (ForeignError)
-import Simple.JSON (readJSON, writeJSON)
+import Simple.JSON (writeJSON)
 
 down ∷ ∀ a b o. Tuple (a → b) (b → Maybe a) → (Choice o ⇒ o a a → o b b)
 down = uncurry L.prism'
@@ -851,33 +849,4 @@ validateJsonAgainstSchema errorFactory o ror __json =
           <> writeJSON j
           <> " for schema "
           <> writeJSON s
-      )
-
-schemaToMatcher ∷
-  ∀ a.
-  Monoid a ⇒
-  Eq a ⇒
-  (String → a) →
-  AST.OpenAPIObject →
-  Maybe (AST.ReferenceOr AST.Schema) →
-  String →
-  a
-schemaToMatcher _ o Nothing _ = mempty
-
-schemaToMatcher errorFactory o (Just x) s =
-  let
-    v = validateJsonAgainstSchema errorFactory o x (AST.JString s)
-  in
-    if v == mempty then
-      mempty
-    else
-      ( either
-          (\e → errorFactory $ "Error while parsing JSON " <> show e)
-          ( \j →
-              let
-                q = validateJsonAgainstSchema errorFactory o x j
-              in
-                if q == mempty then mempty else (v <> q)
-          )
-          (readJSON s ∷ Either (NonEmptyList ForeignError) AST.JSON)
       )
