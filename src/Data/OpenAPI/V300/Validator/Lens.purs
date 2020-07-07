@@ -2,32 +2,42 @@ module Data.OpenAPI.V300.Validator.Lens where
 
 import Prelude
 import Control.Monad.Rec.Class (tailRec, Step(..))
-import Data.Array (notElem)
-import Data.Either (Either(..), either, note)
+import Data.Array (find, notElem)
+import Data.Either (Either(..), either)
 import Data.Foldable (fold)
 import Data.HttpTypes.V000 (Method(..))
 import Data.Int as Int
 import Data.Lens (Forget)
 import Data.Lens as L
 import Data.Lens.Record as LR
-import Data.List (List(..), (:), filter)
+import Data.List (List(..), filter, fromFoldable, last, (:))
 import Data.List as List
-import Data.List.NonEmpty (fromList, NonEmptyList)
+import Data.List.NonEmpty (NonEmptyList)
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.Maybe.First (First)
 import Data.Monoid.Endo (Endo)
 import Data.OpenAPI.V300 as AST
 import Data.Profunctor.Choice (class Choice)
+import Data.String (Pattern(..), length, split)
 import Data.String.Regex (Regex, regex, test)
 import Data.String.Regex.Flags (noFlags)
 import Data.Symbol (SProxy(..))
-import Data.Tuple (Tuple(..), fst, snd, uncurry)
+import Data.Tuple (Tuple(..), fst, uncurry)
 import Foreign (ForeignError)
 import Simple.JSON (readJSON, writeJSON)
 
 down ∷ ∀ a b o. Tuple (a → b) (b → Maybe a) → (Choice o ⇒ o a a → o b b)
 down = uncurry L.prism'
+
+lastOfJSONPointer ∷ String → String
+lastOfJSONPointer s =
+  fromMaybe ""
+    ( last
+        $ filter
+            ((/=) "")
+            (fromFoldable $ split (Pattern "/") s)
+    )
 
 referenceOrPrism' ∷
   ∀ a o.
@@ -41,7 +51,7 @@ referenceOrPrism' f obj = L.prism' AST.RealDeal referenceOrPrism''
   referenceOrPrism'' ∷ AST.ReferenceOr a → Maybe a
   referenceOrPrism'' (AST.RealDeal rd) = Just rd
 
-  referenceOrPrism'' (AST.Ref (AST.Reference { _ref: s })) = maybe Nothing referenceOrPrism'' (L.preview (f s) obj)
+  referenceOrPrism'' (AST.Ref (AST.Reference { _ref: s })) = maybe Nothing referenceOrPrism'' (L.preview (f $ lastOfJSONPointer s) obj)
 
 --- ugggggh
 referenceOrPrismT' ∷
@@ -56,7 +66,7 @@ referenceOrPrismT' f obj = L.prism' (\(Tuple k v) → Tuple k $ AST.RealDeal v) 
   referenceOrPrismT'' ∷ Tuple String (AST.ReferenceOr a) → Maybe (Tuple String a)
   referenceOrPrismT'' (Tuple s (AST.RealDeal rd)) = Just (Tuple s rd)
 
-  referenceOrPrismT'' (Tuple ss (AST.Ref (AST.Reference { _ref: s }))) = maybe Nothing (\v → referenceOrPrismT'' $ Tuple ss v) (L.preview (f s) obj)
+  referenceOrPrismT'' (Tuple k (AST.Ref (AST.Reference { _ref: s }))) = maybe Nothing (\v → referenceOrPrismT'' $ Tuple k v) (L.preview (f $ lastOfJSONPointer s) obj)
 
 referenceOrSchemaPrism ∷ ∀ o. Choice o ⇒ L.Wander o ⇒ AST.OpenAPIObject → (o AST.Schema AST.Schema → o (AST.ReferenceOr AST.Schema) (AST.ReferenceOr AST.Schema))
 referenceOrSchemaPrism = referenceOrPrism' lensToReferenceOrSchema
@@ -463,11 +473,20 @@ validateString ∷
   Monoid a ⇒
   (String → a) →
   String →
+  Maybe (Array AST.JSON) →
   Maybe String →
+  Maybe Int →
+  Maybe Int →
   a
-validateString errorFactory s Nothing = mempty
+validateString errorFactory s (Just e) _ _ _ = if find ((==) (AST.JString s)) e == Nothing then errorFactory $ "Could not find enum " <> s <> " in list " <> show e else mempty
 
-validateString errorFactory s (Just r) = validateString' errorFactory s r
+validateString errorFactory s Nothing r (Just minLength) maxLength = if length s < minLength then errorFactory $ "String " <> s <> "less than minimum length " <> show minLength else validateString errorFactory s Nothing r Nothing maxLength
+
+validateString errorFactory s Nothing r minLength (Just maxLength) = if length s > maxLength then errorFactory $ "String " <> s <> "greater than maximum length " <> show maxLength else validateString errorFactory s Nothing r minLength Nothing
+
+validateString errorFactory s Nothing (Just r) _ _ = validateString' errorFactory s r
+
+validateString errorFactory s Nothing Nothing _ _ = mempty
 
 validateNumber ∷
   ∀ a.
@@ -475,27 +494,148 @@ validateNumber ∷
   (String → a) →
   a →
   Number →
+  Maybe (Array AST.JSON) →
   Maybe Number →
   Maybe Number →
   Maybe AST.BooleanInt →
   Maybe AST.BooleanInt →
   Maybe Number →
   a
-validateNumber errorFactory acc n (Just minimum) maximum (Just (AST.ABoolean exclusiveMinimum)) exclusiveMaximum multipleOf = validateNumber errorFactory (if n <= minimum then errorFactory (" n " <> show n <> " is less than its exclusive minimum " <> show minimum) <> acc else acc) n Nothing maximum Nothing exclusiveMaximum multipleOf
+validateNumber errorFactory acc n (Just e) _ _ _ _ _ =
+  if find ((==) (AST.JNumber n)) e == Nothing then
+    errorFactory $ "Could not find enum " <> show n <> " in list " <> show e
+  else
+    mempty
 
-validateNumber errorFactory acc n (Just minimum) maximum exclusiveMinimum exclusiveMaximum multipleOf = validateNumber errorFactory (if n < minimum then errorFactory (" n " <> show n <> " is less than its minimum " <> show minimum) <> acc else acc) n Nothing maximum Nothing exclusiveMaximum multipleOf
+validateNumber errorFactory acc n Nothing (Just minimum) maximum (Just (AST.ABoolean exclusiveMinimum)) exclusiveMaximum multipleOf =
+  validateNumber
+    errorFactory
+    (if n <= minimum then errorFactory (" n " <> show n <> " is less than its exclusive minimum " <> show minimum) <> acc else acc)
+    n
+    Nothing
+    Nothing
+    maximum
+    Nothing
+    exclusiveMaximum
+    multipleOf
 
-validateNumber errorFactory acc n Nothing maximum (Just (AST.AnInt exclusiveMinimum)) exclusiveMaximum multipleOf = validateNumber errorFactory (if n <= (Int.toNumber exclusiveMinimum) then errorFactory (" n " <> show n <> " is less than its exclusive minimum " <> show exclusiveMinimum) <> acc else acc) n Nothing maximum Nothing exclusiveMaximum multipleOf
+validateNumber errorFactory acc n Nothing (Just minimum) maximum exclusiveMinimum exclusiveMaximum multipleOf =
+  validateNumber errorFactory
+    ( if n < minimum then
+        errorFactory
+          ( " n " <> show n
+              <> " is less than its minimum "
+              <> show minimum
+          )
+          <> acc
+      else
+        acc
+    )
+    n
+    Nothing
+    Nothing
+    maximum
+    Nothing
+    exclusiveMaximum
+    multipleOf
 
-validateNumber errorFactory acc n minimum (Just maximum) exclusiveMinimum (Just (AST.ABoolean exclusiveMaximum)) multipleOf = validateNumber errorFactory (if n >= maximum then errorFactory (" n " <> show n <> " is greater than its exclusive maximum " <> show maximum) <> acc else acc) n minimum Nothing exclusiveMinimum Nothing multipleOf
+validateNumber errorFactory acc n Nothing Nothing maximum (Just (AST.AnInt exclusiveMinimum)) exclusiveMaximum multipleOf =
+  validateNumber errorFactory
+    ( if n <= (Int.toNumber exclusiveMinimum) then
+        errorFactory
+          ( " n " <> show n <> " is less than its exclusive minimum "
+              <> show exclusiveMinimum
+          )
+          <> acc
+      else
+        acc
+    )
+    n
+    Nothing
+    Nothing
+    maximum
+    Nothing
+    exclusiveMaximum
+    multipleOf
 
-validateNumber errorFactory acc n minimum (Just maximum) exclusiveMinimum exclusiveMaximum multipleOf = validateNumber errorFactory (if n > maximum then errorFactory (" n " <> show n <> " is greater than its maximum " <> show minimum) <> acc else acc) n minimum Nothing exclusiveMinimum Nothing multipleOf
+validateNumber errorFactory acc n Nothing minimum (Just maximum) exclusiveMinimum (Just (AST.ABoolean exclusiveMaximum)) multipleOf =
+  validateNumber errorFactory
+    ( if n >= maximum then
+        errorFactory
+          ( " n " <> show n
+              <> " is greater than its exclusive maximum "
+              <> show maximum
+          )
+          <> acc
+      else
+        acc
+    )
+    n
+    Nothing
+    minimum
+    Nothing
+    exclusiveMinimum
+    Nothing
+    multipleOf
 
-validateNumber errorFactory acc n minimum Nothing exclusiveMinimum (Just (AST.AnInt exclusiveMaximum)) multipleOf = validateNumber errorFactory (if n >= (Int.toNumber exclusiveMaximum) then errorFactory (" n " <> show n <> " is greater than its exclusive maximum " <> show exclusiveMaximum) <> acc else acc) n minimum Nothing exclusiveMinimum Nothing multipleOf
+validateNumber errorFactory acc n Nothing minimum (Just maximum) exclusiveMinimum exclusiveMaximum multipleOf =
+  validateNumber errorFactory
+    ( if n > maximum then
+        errorFactory
+          ( " n " <> show n <> " is greater than its maximum "
+              <> show minimum
+          )
+          <> acc
+      else
+        acc
+    )
+    n
+    Nothing
+    minimum
+    Nothing
+    exclusiveMinimum
+    Nothing
+    multipleOf
 
-validateNumber errorFactory acc n minimum maximum exclusiveMinimum exclusiveMaximum (Just multipleOf) = validateNumber errorFactory (if (n / multipleOf) /= 0.0 then errorFactory (" n " <> show n <> " is not a multiple of " <> show multipleOf) <> acc else acc) n minimum maximum exclusiveMinimum exclusiveMaximum Nothing
+validateNumber errorFactory acc n Nothing minimum Nothing exclusiveMinimum (Just (AST.AnInt exclusiveMaximum)) multipleOf =
+  validateNumber errorFactory
+    ( if n >= (Int.toNumber exclusiveMaximum) then
+        errorFactory
+          ( " n " <> show n <> " is greater than its exclusive maximum "
+              <> show exclusiveMaximum
+          )
+          <> acc
+      else
+        acc
+    )
+    n
+    Nothing
+    minimum
+    Nothing
+    exclusiveMinimum
+    Nothing
+    multipleOf
 
-validateNumber _ acc _ _ _ _ _ _ = acc
+validateNumber errorFactory acc n Nothing minimum maximum exclusiveMinimum exclusiveMaximum (Just multipleOf) =
+  validateNumber errorFactory
+    ( if (n / multipleOf) /= 0.0 then
+        errorFactory
+          ( " n " <> show n <> " is not a multiple of "
+              <> show multipleOf
+          )
+          <> acc
+      else
+        acc
+    )
+    n
+    Nothing
+    minimum
+    maximum
+    exclusiveMinimum
+    exclusiveMaximum
+    Nothing
+
+validateNumber _ acc _ _ _ _ _ _ _ = acc
 
 validateJsonAgainstSchema ∷
   ∀ a.
@@ -632,6 +772,7 @@ validateJsonAgainstSchema errorFactory o ror __json =
   -- type is an integer
   go ( AST.Schema
       { _type: Just "integer"
+    , _enum
     , _minimum
     , _maximum
     , _exclusiveMinimum
@@ -643,6 +784,7 @@ validateJsonAgainstSchema errorFactory o ror __json =
       (eff errorFactory " -- validating number ")
       mempty
       n
+      _enum
       _minimum
       _maximum
       _exclusiveMinimum
@@ -652,6 +794,7 @@ validateJsonAgainstSchema errorFactory o ror __json =
   -- type is a number
   go ( AST.Schema
       { _type: Just "number"
+    , _enum
     , _minimum
     , _maximum
     , _exclusiveMinimum
@@ -663,6 +806,7 @@ validateJsonAgainstSchema errorFactory o ror __json =
       (eff errorFactory " -- validating number ")
       mempty
       n
+      _enum
       _minimum
       _maximum
       _exclusiveMinimum
@@ -670,11 +814,14 @@ validateJsonAgainstSchema errorFactory o ror __json =
       _multipleOf
 
   -- type is a string
-  go (AST.Schema { _type: Just "string", _pattern }) (AST.JString s) =
+  go (AST.Schema { _type: Just "string", _pattern, _enum, _minLength, _maxLength }) (AST.JString s) =
     validateString
       (eff errorFactory " -- validating number ")
       s
+      _enum
       _pattern
+      _minLength
+      _maxLength
 
   -- fallback if there is no type, which can be anything
   go (AST.Schema { _type: Nothing }) _ = mempty
@@ -715,28 +862,4 @@ schemaToMatcher errorFactory o (Just x) s =
                 if q == mempty then mempty else (v <> q)
           )
           (readJSON s ∷ Either (NonEmptyList ForeignError) AST.JSON)
-      )
-
-getViablePathItemsFor' ∷
-  ∀ a m.
-  Monoid m ⇒
-  Eq m ⇒
-  (AST.OpenAPIObject → Tuple String AST.PathItem → a → m) →
-  AST.OpenAPIObject →
-  a →
-  List (Tuple String AST.PathItem) →
-  Either m (NonEmptyList (Tuple String AST.PathItem))
-getViablePathItemsFor' d o r paths =
-  let
-    matches =
-      map
-        ( \x →
-            Tuple x $ d o x r
-        )
-        paths
-  in
-    note
-      (fold $ map snd matches)
-      ( fromList
-          $ map fst (filter ((==) mempty <<< snd) matches)
       )

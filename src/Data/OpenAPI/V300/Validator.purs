@@ -1,8 +1,10 @@
 module Data.OpenAPI.V300.Validator
   ( getViablePathItemsForRequest
   , RequestError(..)
+  , T_RequestError
   , getViablePathItemsForResponse
   , ResponseError(..)
+  , T_ResponseError
   ) where
 
 import Prelude
@@ -22,24 +24,42 @@ import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.Newtype (class Newtype)
 import Data.OpenAPI.V300 as AST
-import Data.OpenAPI.V300.Validator.Lens (getHeaderParametersForPathAndMethod, getPathParametersForPathAndMethod, getQueryParametersForPathAndMethod, getViablePathItemsFor', lensFromContentToReferenceOrSchemas, lensToHeadersForResponse, lensToRequestBodyForMethod, lensToResponseSchemasForMethod, schemaToMatcher)
+import Data.OpenAPI.V300.Validator.Lens (getHeaderParametersForPathAndMethod, getPathParametersForPathAndMethod, getQueryParametersForPathAndMethod, lensFromContentToReferenceOrSchemas, lensToHeadersForResponse, lensToRequestBodyForMethod, lensToResponseSchemasForMethod, schemaToMatcher)
 import Data.String (split, Pattern(..))
 import Data.String.CodeUnits (fromCharArray, toCharArray)
-import Data.Tuple (Tuple(..), snd)
+import Data.Symbol (SProxy(..))
+import Data.Tuple (Tuple(..), fst, snd)
+import Effect.Class.Console (log)
+import Effect.Unsafe (unsafePerformEffect)
+import Record (set)
+
+log' :: forall a. Show a => a -> a
+log' a =
+  unsafePerformEffect do
+    log $ show a
+    pure a
+
+log'' :: forall a. Eq a => a -> a -> a
+log'' assumption a =
+  unsafePerformEffect do
+    log $ show (a == assumption)
+    pure a
+
+type T_RequestError
+  = { method ∷ Maybe (NonEmptyList String)
+    , protocol ∷ Maybe (NonEmptyList String)
+    , host ∷ Maybe (NonEmptyList String)
+    , url ∷ Maybe (NonEmptyList String)
+    , path ∷ Maybe (NonEmptyList String)
+    , pathname ∷ Maybe (NonEmptyList String)
+    , query ∷ Maybe (HttpTypesMap (NonEmptyList String))
+    , headers ∷ Maybe (HttpTypesMap (NonEmptyList String))
+    , body ∷ Maybe (NonEmptyList String)
+    , timestamp ∷ Maybe (NonEmptyList String)
+    }
 
 newtype RequestError
-  = RequestError
-  { method ∷ Maybe (NonEmptyList String)
-  , protocol ∷ Maybe (NonEmptyList String)
-  , host ∷ Maybe (NonEmptyList String)
-  , url ∷ Maybe (NonEmptyList String)
-  , path ∷ Maybe (NonEmptyList String)
-  , pathname ∷ Maybe (NonEmptyList String)
-  , query ∷ Maybe (HttpTypesMap (NonEmptyList String))
-  , headers ∷ Maybe (HttpTypesMap (NonEmptyList String))
-  , body ∷ Maybe (NonEmptyList String)
-  , timestamp ∷ Maybe (NonEmptyList String)
-  }
+  = RequestError T_RequestError
 
 derive instance newtypeRequestError ∷ Newtype RequestError _
 
@@ -80,17 +100,41 @@ getViablePathItemsForRequestUsingMethod ∷
 getViablePathItemsForRequestUsingMethod (Request { method }) paths =
   note
     ( RequestError
-        ( mempty
-            { method:
-                Just
+        $ ( set (SProxy ∷ SProxy "method")
+              ( Just
                   ( singleton $ "Method "
                       <> show method
                       <> " does not exist in OpenAPI schema"
                   )
-            }
-        )
+              )
+              (mempty ∷ T_RequestError)
+          )
     )
     (fromList (filter (hasMethod method <<< snd) paths))
+
+getViablePathItemsFor' ∷
+  ∀ a m.
+  Monoid m ⇒
+  Eq m ⇒
+  (AST.OpenAPIObject → Tuple String AST.PathItem → a → m) →
+  AST.OpenAPIObject →
+  a →
+  List (Tuple String AST.PathItem) →
+  Either m (NonEmptyList (Tuple String AST.PathItem))
+getViablePathItemsFor' d o r paths =
+  let
+    matches =
+      map
+        ( \x →
+            Tuple x $ d o x r
+        )
+        paths
+  in
+    note
+      (fold $ map snd matches)
+      ( fromList
+          $ map fst (filter ((==) mempty <<< snd) matches)
+      )
 
 getViablePathItemsForRequestUsingPath ∷
   AST.OpenAPIObject →
@@ -112,7 +156,19 @@ getViablePathItemsForRequestUsingHeaders =
         matchHeaderOrQueryToOAIHeaderOrQuery
           (headersToKV <$> headers)
           getHeaderParametersForPathAndMethod
-          (\k s → RequestError $ mempty { headers: Just (Map.singleton k $ singleton s) })
+          ( \k s →
+              ( RequestError
+                  $ ( set (SProxy ∷ SProxy "headers")
+                        ( Just
+                            $ HttpTypesMap
+                                ( Map.singleton k
+                                    (singleton s)
+                                )
+                        )
+                        (mempty ∷ T_RequestError)
+                    )
+              )
+          )
           oo
           tpi
           method
@@ -138,7 +194,19 @@ getViablePathItemsForRequestUsingQuery =
         matchHeaderOrQueryToOAIHeaderOrQuery
           (queryToKV <$> query)
           getQueryParametersForPathAndMethod
-          (\k s → RequestError $ mempty { query: Just (Map.singleton k $ singleton s) })
+          ( \k s →
+              ( RequestError
+                  $ ( set (SProxy ∷ SProxy "query")
+                        ( Just
+                            $ HttpTypesMap
+                                ( Map.singleton k
+                                    (singleton s)
+                                )
+                        )
+                        (mempty ∷ T_RequestError)
+                    )
+              )
+          )
           oo
           tpi
           method
@@ -186,45 +254,52 @@ defaultMatch = const mempty
 
 simpleStringMatch ∷ (String → RequestError) → String → String → RequestError
 simpleStringMatch errorFactory tomatch s
-  | tomatch == s = errorFactory $ "Could not match " <> tomatch <> " and " <> s
+  | tomatch /= s = errorFactory $ "Could not match " <> tomatch <> " and " <> s
   | otherwise = mempty
 
 matchPathToOAIPath ∷ AST.OpenAPIObject → Tuple String AST.PathItem → Request → RequestError
-matchPathToOAIPath o (Tuple p pi) (Request { path, method }) =
+matchPathToOAIPath o (Tuple p pi) (Request { pathname, method }) =
   maybe
-    (RequestError $ mempty { path: Just $ singleton "Incoming path for match is nothing" })
+    ( RequestError
+        $ ( set (SProxy ∷ SProxy "path")
+              (Just (singleton "Incoming path for match is nothing"))
+              (mempty ∷ T_RequestError)
+          )
+    )
     (\_p → tailRec go { acc: mempty, loai: (splitPathAndRemoveEmpties p), linc: (splitPathAndRemoveEmpties _p) })
-    path
+    pathname
   where
   errorFactory =
     ( \s →
         RequestError
-          $ mempty
-              { path:
-                  Just
+          $ ( set (SProxy ∷ SProxy "path")
+                ( Just
                     ( singleton
                         $ "Error for path "
                         <> p
                         <> " @ "
-                        <> show path
+                        <> show pathname
                         <> s
                     )
-              }
+                )
+                (mempty ∷ T_RequestError)
+            )
     )
 
   mismatchError =
     Done
       ( RequestError
-          $ mempty
-              { path:
-                  Just
+          $ ( set (SProxy ∷ SProxy "path")
+                ( Just
                     ( singleton
                         $ "Paths are different lengths: "
                         <> p
                         <> " @ "
-                        <> show path
+                        <> show pathname
                     )
-              }
+                )
+                (mempty ∷ T_RequestError)
+            )
       )
 
   getMatcherFromSpec ∷ String → String → RequestError
@@ -290,22 +365,6 @@ headersToKV (HttpTypesMap m) = fold $ map toTSS (Map.toUnfoldable m ∷ List (Tu
 
   toTSS (Tuple k (ArrayHeader a)) = List.fromFoldable $ map (Tuple k) a
 
-{-
-  errorFactory =
-    ( \s →
-        RequestError
-          $ mempty
-              { path:
-                  Just
-                    ( singleton
-                        $ "Error for  "
-                        <> nameOfParam
-                        <> " @ "
-                        <> show path
-                        <> s
-                    )
-              }
-    )-}
 matchHeaderOrQueryToOAIHeaderOrQuery ∷
   forall m.
   Monoid m =>
@@ -384,11 +443,13 @@ matchHeaderOrQueryToOAIHeaderOrQuery mltss getParams errorFactory o (Tuple p pi)
 requestBodyError' ∷ String → String → RequestError
 requestBodyError' path s =
   RequestError
-    ( mempty
-        { body:
-            Just $ singleton ("At path" <> path <> " @@ " <> s)
-        }
-    )
+    $ ( set (SProxy ∷ SProxy "body")
+          ( Just
+              $ singleton
+                  ("At path" <> path <> " @@ " <> s)
+          )
+          (mempty ∷ T_RequestError)
+      )
 
 -- todo, this is really close to response body. merge?
 matchRequestBodyToOAIRequestBody ∷ AST.OpenAPIObject → Tuple String AST.PathItem → Request → RequestError
@@ -445,13 +506,15 @@ getViablePathItemsForRequest o@(AST.OpenAPIObject { _paths: (AST.OAIMap oo) }) r
     ]
 
 -----------------------------
+type T_ResponseError
+  = { statusCode :: Maybe (NonEmptyList String)
+    , body :: Maybe (NonEmptyList String)
+    , headers :: Maybe (HttpTypesMap (NonEmptyList String))
+    , timestamp :: Maybe (NonEmptyList String)
+    }
+
 newtype ResponseError
-  = ResponseError
-  { statusCode :: Maybe (NonEmptyList String)
-  , body :: Maybe (NonEmptyList String)
-  , headers :: Maybe (HttpTypesMap (NonEmptyList String))
-  , timestamp :: Maybe (NonEmptyList String)
-  }
+  = ResponseError T_ResponseError
 
 derive instance newtypeResponseError ∷ Newtype ResponseError _
 
@@ -469,11 +532,13 @@ instance showResponseError ∷ Show ResponseError where
 responseBodyError' ∷ String → String → ResponseError
 responseBodyError' path s =
   ResponseError
-    ( mempty
-        { body:
-            Just $ singleton ("At path" <> path <> " @@ " <> s)
-        }
-    )
+    $ ( set (SProxy ∷ SProxy "body")
+          ( Just
+              $ singleton
+                  ("At path" <> path <> " @@ " <> s)
+          )
+          (mempty ∷ T_ResponseError)
+      )
 
 -- todo, this is really close to request body. merge?
 matchResponseBodyToOAIResponseBody ∷ AST.OpenAPIObject → Tuple String AST.PathItem → Tuple Request Response → ResponseError
@@ -529,7 +594,19 @@ getViablePathItemsForResponseUsingHeaders o rq rs l =
         matchHeaderOrQueryToOAIHeaderOrQuery
           (headersToKV <$> headers)
           (\ooo p m → L.toListOf (lensToHeadersForResponse ooo m (show statusCode)) p)
-          (\k s → ResponseError $ mempty { headers: Just (Map.singleton k $ singleton s) })
+          ( \k s →
+              ( ResponseError
+                  $ ( set (SProxy ∷ SProxy "headers")
+                        ( Just
+                            $ HttpTypesMap
+                                ( Map.singleton k
+                                    (singleton s)
+                                )
+                        )
+                        (mempty ∷ T_ResponseError)
+                    )
+              )
+          )
           oo
           tpi
           method
