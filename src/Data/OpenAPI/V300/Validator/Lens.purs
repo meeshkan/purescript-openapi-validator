@@ -338,6 +338,28 @@ lensToResponseSchemasForMethod obj m s =
     <<< L._Just
     <<< lensFromContentToReferenceOrSchemas
 
+lensFromContentToMediaTypeTuple ∷
+  ∀ o.
+  Choice o ⇒
+  L.Wander o ⇒
+  o (Tuple String AST.MediaType) (Tuple String AST.MediaType) →
+  o (AST.OAIMap AST.MediaType) (AST.OAIMap AST.MediaType)
+lensFromContentToMediaTypeTuple =
+  down AST._OAIMap
+    <<< mapIso
+    <<< L.traversed
+
+lensFromMediaTypeToReferenceOrschema ∷
+  ∀ o.
+  Choice o ⇒
+  L.Wander o ⇒
+  o (AST.ReferenceOr AST.Schema) (AST.ReferenceOr AST.Schema) →
+  o AST.MediaType AST.MediaType
+lensFromMediaTypeToReferenceOrschema =
+  down AST._MediaType
+    <<< LR.prop (SProxy ∷ SProxy "_schema")
+    <<< L._Just
+
 lensFromContentToReferenceOrSchemas ∷
   ∀ o.
   Choice o ⇒
@@ -345,13 +367,9 @@ lensFromContentToReferenceOrSchemas ∷
   o (AST.ReferenceOr AST.Schema) (AST.ReferenceOr AST.Schema) →
   o (AST.OAIMap AST.MediaType) (AST.OAIMap AST.MediaType)
 lensFromContentToReferenceOrSchemas =
-  down AST._OAIMap
-    <<< mapIso
-    <<< L.traversed
+  lensFromContentToMediaTypeTuple
     <<< L._2
-    <<< down AST._MediaType
-    <<< LR.prop (SProxy ∷ SProxy "_schema")
-    <<< L._Just
+    <<< lensFromMediaTypeToReferenceOrschema
 
 lensToPathParameter ∷ ∀ o. Choice o ⇒ L.Wander o ⇒ o AST.Parameter AST.Parameter → o AST.Parameter AST.Parameter
 lensToPathParameter = L.filtered ((==) "path" <<< _._in <<< \(AST.Parameter p) → p)
